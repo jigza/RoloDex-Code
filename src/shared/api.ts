@@ -1,7 +1,6 @@
-import { ANTHROPIC_DEFAULT_MAX_TOKENS } from "../api/providers/constants"
-import { ModelInfo, ProviderName, ProviderSettings } from "../schemas"
+import type { ModelInfo, ProviderSettings } from "@roo-code/types"
 
-export type { ModelInfo, ProviderName, ProviderSettings }
+import { ANTHROPIC_DEFAULT_MAX_TOKENS } from "../api/providers/constants"
 
 export type ApiHandlerOptions = Omit<ProviderSettings, "apiProvider">
 
@@ -1261,10 +1260,43 @@ export const litellmDefaultModelInfo: ModelInfo = {
 	cacheWritesPrice: 3.75,
 	cacheReadsPrice: 0.3,
 }
+
+export const LITELLM_COMPUTER_USE_MODELS = new Set([
+	"claude-3-5-sonnet-latest",
+	"claude-opus-4-20250514",
+	"claude-sonnet-4-20250514",
+	"claude-3-7-sonnet-latest",
+	"claude-3-7-sonnet-20250219",
+	"claude-3-5-sonnet-20241022",
+	"vertex_ai/claude-3-5-sonnet",
+	"vertex_ai/claude-3-5-sonnet-v2",
+	"vertex_ai/claude-3-5-sonnet-v2@20241022",
+	"vertex_ai/claude-3-7-sonnet@20250219",
+	"vertex_ai/claude-opus-4@20250514",
+	"vertex_ai/claude-sonnet-4@20250514",
+	"openrouter/anthropic/claude-3.5-sonnet",
+	"openrouter/anthropic/claude-3.5-sonnet:beta",
+	"openrouter/anthropic/claude-3.7-sonnet",
+	"openrouter/anthropic/claude-3.7-sonnet:beta",
+	"anthropic.claude-opus-4-20250514-v1:0",
+	"anthropic.claude-sonnet-4-20250514-v1:0",
+	"anthropic.claude-3-7-sonnet-20250219-v1:0",
+	"anthropic.claude-3-5-sonnet-20241022-v2:0",
+	"us.anthropic.claude-3-5-sonnet-20241022-v2:0",
+	"us.anthropic.claude-3-7-sonnet-20250219-v1:0",
+	"us.anthropic.claude-opus-4-20250514-v1:0",
+	"us.anthropic.claude-sonnet-4-20250514-v1:0",
+	"eu.anthropic.claude-3-5-sonnet-20241022-v2:0",
+	"eu.anthropic.claude-3-7-sonnet-20250219-v1:0",
+	"eu.anthropic.claude-opus-4-20250514-v1:0",
+	"eu.anthropic.claude-sonnet-4-20250514-v1:0",
+	"snowflake/claude-3-5-sonnet",
+])
+
 // xAI
 // https://docs.x.ai/docs/api-reference
 export type XAIModelId = keyof typeof xaiModels
-export const xaiDefaultModelId: XAIModelId = "grok-3-beta"
+export const xaiDefaultModelId: XAIModelId = "grok-3"
 export const xaiModels = {
 	"grok-3-beta": {
 		maxTokens: 8192,
@@ -1302,6 +1334,44 @@ export const xaiModels = {
 		inputPrice: 0.6,
 		outputPrice: 4.0,
 		description: "xAI's Grok-3 mini fast beta model with 131K context window",
+		supportsReasoningEffort: true,
+	},
+	"grok-3": {
+		maxTokens: 8192,
+		contextWindow: 131072,
+		supportsImages: false,
+		supportsPromptCache: false,
+		inputPrice: 3.0,
+		outputPrice: 15.0,
+		description: "xAI's Grok-3 model with 131K context window",
+	},
+	"grok-3-fast": {
+		maxTokens: 8192,
+		contextWindow: 131072,
+		supportsImages: false,
+		supportsPromptCache: false,
+		inputPrice: 5.0,
+		outputPrice: 25.0,
+		description: "xAI's Grok-3 fast model with 131K context window",
+	},
+	"grok-3-mini": {
+		maxTokens: 8192,
+		contextWindow: 131072,
+		supportsImages: false,
+		supportsPromptCache: false,
+		inputPrice: 0.3,
+		outputPrice: 0.5,
+		description: "xAI's Grok-3 mini model with 131K context window",
+		supportsReasoningEffort: true,
+	},
+	"grok-3-mini-fast": {
+		maxTokens: 8192,
+		contextWindow: 131072,
+		supportsImages: false,
+		supportsPromptCache: false,
+		inputPrice: 0.6,
+		outputPrice: 4.0,
+		description: "xAI's Grok-3 mini fast model with 131K context window",
 		supportsReasoningEffort: true,
 	},
 	"grok-2-latest": {
