@@ -38,6 +38,7 @@ import { getApiMetrics } from "../../shared/getApiMetrics"
 import { ClineAskResponse } from "../../shared/WebviewMessage"
 import { defaultModeSlug } from "../../shared/modes"
 import { DiffStrategy } from "../../shared/tools"
+import { EXPERIMENT_IDS, experiments } from "../../shared/experiments"
 
 // services
 import { UrlContentFetcher } from "../../services/browser/UrlContentFetcher"
@@ -64,10 +65,12 @@ import { SYSTEM_PROMPT } from "../prompts/system"
 import { ToolRepetitionDetector } from "../tools/ToolRepetitionDetector"
 import { FileContextTracker } from "../context-tracking/FileContextTracker"
 import { RooIgnoreController } from "../ignore/RooIgnoreController"
+import { RooProtectedController } from "../protect/RooProtectedController"
 import { type AssistantMessageContent, parseAssistantMessage, presentAssistantMessage } from "../assistant-message"
 import { truncateConversationIfNeeded } from "../sliding-window"
 import { ClineProvider } from "../webview/ClineProvider"
 import { MultiSearchReplaceDiffStrategy } from "../diff/strategies/multi-search-replace"
+import { MultiFileSearchReplaceDiffStrategy } from "../diff/strategies/multi-file-search-replace"
 import { readApiMessages, saveApiMessages, readTaskMessages, saveTaskMessages, taskMetadata } from "../task-persistence"
 import { getEnvironmentDetails } from "../environment/getEnvironmentDetails"
 import {
@@ -137,11 +140,20 @@ export class Task extends EventEmitter<ClineEvents> {
 	// API
 	readonly apiConfiguration: ProviderSettings
 	api: ApiHandler
-	private lastApiRequestTime?: number
+	private static lastGlobalApiRequestTime?: number
 	private consecutiveAutoApprovedRequestsCount: number = 0
+
+	/**
+	 * Reset the global API request timestamp. This should only be used for testing.
+	 * @internal
+	 */
+	static resetGlobalApiRequestTime(): void {
+		Task.lastGlobalApiRequestTime = undefined
+	}
 
 	toolRepetitionDetector: ToolRepetitionDetector
 	rooIgnoreController?: RooIgnoreController
+	rooProtectedController?: RooProtectedController
 	fileContextTracker: FileContextTracker
 	urlContentFetcher: UrlContentFetcher
 	terminalProcess?: RooTerminalProcess
@@ -221,6 +233,7 @@ export class Task extends EventEmitter<ClineEvents> {
 		this.taskNumber = -1
 
 		this.rooIgnoreController = new RooIgnoreController(this.cwd)
+		this.rooProtectedController = new RooProtectedController(this.cwd)
 		this.fileContextTracker = new FileContextTracker(provider, this.taskId)
 
 		this.rooIgnoreController.initialize().catch((error) => {
@@ -250,7 +263,24 @@ export class Task extends EventEmitter<ClineEvents> {
 			TelemetryService.instance.captureTaskCreated(this.taskId)
 		}
 
-		this.diffStrategy = new MultiSearchReplaceDiffStrategy(this.fuzzyMatchThreshold)
+		// Only set up diff strategy if diff is enabled
+		if (this.diffEnabled) {
+			// Default to old strategy, will be updated if experiment is enabled
+			this.diffStrategy = new MultiSearchReplaceDiffStrategy(this.fuzzyMatchThreshold)
+
+			// Check experiment asynchronously and update strategy if needed
+			provider.getState().then((state) => {
+				const isMultiFileApplyDiffEnabled = experiments.isEnabled(
+					state.experiments ?? {},
+					EXPERIMENT_IDS.MULTI_FILE_APPLY_DIFF,
+				)
+
+				if (isMultiFileApplyDiffEnabled) {
+					this.diffStrategy = new MultiFileSearchReplaceDiffStrategy(this.fuzzyMatchThreshold)
+				}
+			})
+		}
+
 		this.toolRepetitionDetector = new ToolRepetitionDetector(this.consecutiveMistakeLimit)
 
 		onCreated?.(this)
@@ -340,17 +370,17 @@ export class Task extends EventEmitter<ClineEvents> {
 		await this.saveClineMessages()
 	}
 
-	private async updateClineMessage(partialMessage: ClineMessage) {
+	private async updateClineMessage(message: ClineMessage) {
 		const provider = this.providerRef.deref()
-		await provider?.postMessageToWebview({ type: "partialMessage", partialMessage })
-		this.emit("message", { action: "updated", message: partialMessage })
+		await provider?.postMessageToWebview({ type: "messageUpdated", clineMessage: message })
+		this.emit("message", { action: "updated", message })
 
-		const shouldCaptureMessage = partialMessage.partial !== true && CloudService.isEnabled()
+		const shouldCaptureMessage = message.partial !== true && CloudService.isEnabled()
 
 		if (shouldCaptureMessage) {
 			CloudService.instance.captureEvent({
 				event: TelemetryEventName.TASK_MESSAGE,
-				properties: { taskId: this.taskId, message: partialMessage },
+				properties: { taskId: this.taskId, message },
 			})
 		}
 	}
@@ -387,6 +417,7 @@ export class Task extends EventEmitter<ClineEvents> {
 		text?: string,
 		partial?: boolean,
 		progressStatus?: ToolProgressStatus,
+		isProtected?: boolean,
 	): Promise<{ response: ClineAskResponse; text?: string; images?: string[] }> {
 		// If this Cline instance was aborted by the provider, then the only
 		// thing keeping us alive is a promise still running in the background,
@@ -414,6 +445,7 @@ export class Task extends EventEmitter<ClineEvents> {
 					lastMessage.text = text
 					lastMessage.partial = partial
 					lastMessage.progressStatus = progressStatus
+					lastMessage.isProtected = isProtected
 					// TODO: Be more efficient about saving and posting only new
 					// data or one whole message at a time so ignore partial for
 					// saves, and only post parts of partial message instead of
@@ -425,7 +457,7 @@ export class Task extends EventEmitter<ClineEvents> {
 					// state.
 					askTs = Date.now()
 					this.lastMessageTs = askTs
-					await this.addToClineMessages({ ts: askTs, type: "ask", ask: type, text, partial })
+					await this.addToClineMessages({ ts: askTs, type: "ask", ask: type, text, partial, isProtected })
 					throw new Error("Current ask promise was ignored (#2)")
 				}
 			} else {
@@ -452,6 +484,7 @@ export class Task extends EventEmitter<ClineEvents> {
 					lastMessage.text = text
 					lastMessage.partial = false
 					lastMessage.progressStatus = progressStatus
+					lastMessage.isProtected = isProtected
 					await this.saveClineMessages()
 					this.updateClineMessage(lastMessage)
 				} else {
@@ -461,7 +494,7 @@ export class Task extends EventEmitter<ClineEvents> {
 					this.askResponseImages = undefined
 					askTs = Date.now()
 					this.lastMessageTs = askTs
-					await this.addToClineMessages({ ts: askTs, type: "ask", ask: type, text })
+					await this.addToClineMessages({ ts: askTs, type: "ask", ask: type, text, isProtected })
 				}
 			}
 		} else {
@@ -471,7 +504,7 @@ export class Task extends EventEmitter<ClineEvents> {
 			this.askResponseImages = undefined
 			askTs = Date.now()
 			this.lastMessageTs = askTs
-			await this.addToClineMessages({ ts: askTs, type: "ask", ask: type, text })
+			await this.addToClineMessages({ ts: askTs, type: "ask", ask: type, text, isProtected })
 		}
 
 		await pWaitFor(() => this.askResponse !== undefined || this.lastMessageTs !== askTs, { interval: 100 })
@@ -977,6 +1010,59 @@ export class Task extends EventEmitter<ClineEvents> {
 		await this.initiateTaskLoop(newUserContent)
 	}
 
+	public dispose(): void {
+		// Stop waiting for child task completion.
+		if (this.pauseInterval) {
+			clearInterval(this.pauseInterval)
+			this.pauseInterval = undefined
+		}
+
+		// Release any terminals associated with this task.
+		try {
+			// Release any terminals associated with this task.
+			TerminalRegistry.releaseTerminalsForTask(this.taskId)
+		} catch (error) {
+			console.error("Error releasing terminals:", error)
+		}
+
+		try {
+			this.urlContentFetcher.closeBrowser()
+		} catch (error) {
+			console.error("Error closing URL content fetcher browser:", error)
+		}
+
+		try {
+			this.browserSession.closeBrowser()
+		} catch (error) {
+			console.error("Error closing browser session:", error)
+		}
+
+		try {
+			if (this.rooIgnoreController) {
+				this.rooIgnoreController.dispose()
+				this.rooIgnoreController = undefined
+			}
+		} catch (error) {
+			console.error("Error disposing RooIgnoreController:", error)
+			// This is the critical one for the leak fix
+		}
+
+		try {
+			this.fileContextTracker.dispose()
+		} catch (error) {
+			console.error("Error disposing file context tracker:", error)
+		}
+
+		try {
+			// If we're not streaming then `abortStream` won't be called
+			if (this.isStreaming && this.diffViewProvider.isEditing) {
+				this.diffViewProvider.revertChanges().catch(console.error)
+			}
+		} catch (error) {
+			console.error("Error reverting diff changes:", error)
+		}
+	}
+
 	public async abortTask(isAbandoned = false) {
 		console.log(`[subtasks] aborting task ${this.taskId}.${this.instanceId}`)
 
@@ -988,28 +1074,19 @@ export class Task extends EventEmitter<ClineEvents> {
 		this.abort = true
 		this.emit("taskAborted")
 
-		// Stop waiting for child task completion.
-		if (this.pauseInterval) {
-			clearInterval(this.pauseInterval)
-			this.pauseInterval = undefined
+		try {
+			this.dispose() // Call the centralized dispose method
+		} catch (error) {
+			console.error(`Error during task ${this.taskId}.${this.instanceId} disposal:`, error)
+			// Don't rethrow - we want abort to always succeed
 		}
-
-		// Release any terminals associated with this task.
-		TerminalRegistry.releaseTerminalsForTask(this.taskId)
-
-		this.urlContentFetcher.closeBrowser()
-		this.browserSession.closeBrowser()
-		this.rooIgnoreController?.dispose()
-		this.fileContextTracker.dispose()
-
-		// If we're not streaming then `abortStream` (which reverts the diff
-		// view changes) won't be called, so we need to revert the changes here.
-		if (this.isStreaming && this.diffViewProvider.isEditing) {
-			await this.diffViewProvider.revertChanges()
-		}
-
 		// Save the countdown message in the automatic retry or other content.
-		await this.saveClineMessages()
+		try {
+			// Save the countdown message in the automatic retry or other content.
+			await this.saveClineMessages()
+		} catch (error) {
+			console.error(`Error saving messages during abort for task ${this.taskId}.${this.instanceId}:`, error)
+		}
 	}
 
 	// Used when a sub-task is launched and the parent task is waiting for it to
@@ -1362,19 +1439,22 @@ export class Task extends EventEmitter<ClineEvents> {
 			} finally {
 				this.isStreaming = false
 			}
-			if (
-				inputTokens > 0 ||
-				outputTokens > 0 ||
-				cacheWriteTokens > 0 ||
-				cacheReadTokens > 0 ||
-				typeof totalCost !== "undefined"
-			) {
+
+			if (inputTokens > 0 || outputTokens > 0 || cacheWriteTokens > 0 || cacheReadTokens > 0) {
 				TelemetryService.instance.captureLlmCompletion(this.taskId, {
 					inputTokens,
 					outputTokens,
 					cacheWriteTokens,
 					cacheReadTokens,
-					cost: totalCost,
+					cost:
+						totalCost ??
+						calculateApiCostAnthropic(
+							this.api.getModel().info,
+							inputTokens,
+							outputTokens,
+							cacheWriteTokens,
+							cacheReadTokens,
+						),
 				})
 			}
 
@@ -1588,10 +1668,11 @@ export class Task extends EventEmitter<ClineEvents> {
 
 		let rateLimitDelay = 0
 
-		// Only apply rate limiting if this isn't the first request
-		if (this.lastApiRequestTime) {
+		// Use the shared timestamp so that subtasks respect the same rate-limit
+		// window as their parent tasks.
+		if (Task.lastGlobalApiRequestTime) {
 			const now = Date.now()
-			const timeSinceLastRequest = now - this.lastApiRequestTime
+			const timeSinceLastRequest = now - Task.lastGlobalApiRequestTime
 			const rateLimit = apiConfiguration?.rateLimitSeconds || 0
 			rateLimitDelay = Math.ceil(Math.max(0, rateLimit * 1000 - timeSinceLastRequest) / 1000)
 		}
@@ -1606,8 +1687,9 @@ export class Task extends EventEmitter<ClineEvents> {
 			}
 		}
 
-		// Update last request time before making the request
-		this.lastApiRequestTime = Date.now()
+		// Update last request time before making the request so that subsequent
+		// requests — even from new subtasks — will honour the provider's rate-limit.
+		Task.lastGlobalApiRequestTime = Date.now()
 
 		const systemPrompt = await this.getSystemPrompt()
 		const { contextTokens } = this.getTokenUsage()

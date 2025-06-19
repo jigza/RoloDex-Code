@@ -5,10 +5,11 @@ import axios from "axios"
 import * as vscode from "vscode"
 import { z } from "zod"
 
-import type { CloudUserInfo } from "@roo-code/types"
+import type { CloudUserInfo, CloudOrganizationMembership } from "@roo-code/types"
 
 import { getClerkBaseUrl, getRooCodeApiUrl } from "./Config"
 import { RefreshTimer } from "./RefreshTimer"
+import { getUserAgent } from "./utils"
 
 export interface AuthServiceEvents {
 	"inactive-session": [data: { previousState: AuthState }]
@@ -419,7 +420,40 @@ export class AuthService extends EventEmitter<AuthServiceEvents> {
 		}
 
 		userInfo.picture = userData?.image_url
+
+		// Fetch organization memberships separately
+		try {
+			const orgMemberships = await this.clerkGetOrganizationMemberships()
+			if (orgMemberships && orgMemberships.length > 0) {
+				// Get the first (or active) organization membership
+				const primaryOrgMembership = orgMemberships[0]
+				const organization = primaryOrgMembership?.organization
+
+				if (organization) {
+					userInfo.organizationId = organization.id
+					userInfo.organizationName = organization.name
+					userInfo.organizationRole = primaryOrgMembership.role
+				}
+			}
+		} catch (error) {
+			this.log("[auth] Failed to fetch organization memberships:", error)
+			// Don't throw - organization info is optional
+		}
+
 		return userInfo
+	}
+
+	private async clerkGetOrganizationMemberships(): Promise<CloudOrganizationMembership[]> {
+		const response = await axios.get(`${getClerkBaseUrl()}/v1/me/organization_memberships`, {
+			headers: {
+				Authorization: `Bearer ${this.credentials!.clientToken}`,
+				"User-Agent": this.userAgent(),
+			},
+		})
+
+		// The response structure is: { response: [...] }
+		// Extract the organization memberships from the response.response array
+		return response.data?.response || []
 	}
 
 	private async clerkLogout(credentials: AuthCredentials): Promise<void> {
@@ -435,7 +469,7 @@ export class AuthService extends EventEmitter<AuthServiceEvents> {
 	}
 
 	private userAgent(): string {
-		return `Roo-Code ${this.context.extension?.packageJSON?.version}`
+		return getUserAgent(this.context)
 	}
 
 	private static _instance: AuthService | null = null
